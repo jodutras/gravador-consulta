@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Gravar consulta</title>
+<style>
+  :root {
+    --fundo: #0f1720;
+    --cartao: #18232f;
+    --borda: #2a3a4a;
+    --texto: #e8eef4;
+    --suave: #93a5b5;
+    --acento: #2f9e6e;
+    --alerta: #d9534f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--fundo); color: var(--texto);
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .cartao {
+    width: 100%; max-width: 420px; background: var(--cartao);
+    border: 1px solid var(--borda); border-radius: 16px; padding: 28px 22px;
+  }
+  h1 { font-size: 19px; margin: 0 0 6px; font-weight: 600; }
+  p.sub { margin: 0 0 22px; color: var(--suave); font-size: 14px; line-height: 1.5; }
+  input[type=tel] {
+    width: 100%; padding: 16px; font-size: 30px; text-align: center;
+    letter-spacing: 10px; border-radius: 12px; border: 1px solid var(--borda);
+    background: #0d151d; color: var(--texto); margin-bottom: 14px;
+  }
+  input[type=tel]:focus { outline: none; border-color: var(--acento); }
+  button {
+    width: 100%; padding: 17px; font-size: 16px; font-weight: 600;
+    border: none; border-radius: 12px; background: var(--acento); color: #fff;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; }
+  button.parar { background: var(--alerta); }
+  .oculto { display: none; }
+  .erro {
+    background: rgba(217,83,79,.12); border: 1px solid rgba(217,83,79,.4);
+    color: #ffb3b0; padding: 12px 14px; border-radius: 10px;
+    font-size: 14px; margin-bottom: 14px; line-height: 1.45;
+  }
+  .cronometro {
+    font-size: 46px; font-variant-numeric: tabular-nums; text-align: center;
+    margin: 26px 0 6px; font-weight: 300;
+  }
+  .estado { text-align: center; color: var(--suave); font-size: 14px; margin-bottom: 26px; }
+  .ponto {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--alerta); margin-right: 7px; animation: pisca 1.2s infinite;
+  }
+  @keyframes pisca { 50% { opacity: .25; } }
+  .fim { text-align: center; padding: 14px 0; }
+  .fim .marca { font-size: 46px; margin-bottom: 12px; }
+  .aviso {
+    margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--borda);
+    color: var(--suave); font-size: 12px; line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="cartao">
+
+  <!-- 1. token -->
+  <section id="tela-token">
+    <h1>Gravar consulta</h1>
+    <p class="sub">Digite o código de 6 dígitos que aparece na tela do computador.</p>
+    <div id="erro-token" class="erro oculto"></div>
+    <input id="campo-token" type="tel" inputmode="numeric" maxlength="6"
+           autocomplete="off" placeholder="000000">
+    <button id="btn-token">Continuar</button>
+  </section>
+
+  <!-- 2. pronto para gravar -->
+  <section id="tela-pronto" class="oculto">
+    <h1>Tudo certo</h1>
+    <p class="sub">Aproxime o aparelho e toque em gravar quando iniciar o atendimento.</p>
+    <div id="erro-mic" class="erro oculto"></div>
+    <button id="btn-gravar">Iniciar gravação</button>
+  </section>
+
+  <!-- 3. gravando -->
+  <section id="tela-gravando" class="oculto">
+    <div class="cronometro" id="cronometro">00:00</div>
+    <div class="estado"><span class="ponto"></span>Gravando</div>
+    <button id="btn-parar" class="parar">Encerrar e enviar</button>
+  </section>
+
+  <!-- 4. enviando -->
+  <section id="tela-enviando" class="oculto">
+    <div class="fim">
+      <div class="marca">⏳</div>
+      <h1>Enviando…</h1>
+      <p class="sub">Não feche esta tela até terminar.</p>
+    </div>
+  </section>
+
+  <!-- 5. pronto -->
+  <section id="tela-fim" class="oculto">
+    <div class="fim">
+      <div class="marca">✓</div>
+      <h1>Gravação enviada</h1>
+      <p class="sub">O resumo aparecerá no atendimento em alguns minutos.
+        Pode fechar esta janela.</p>
+    </div>
+  </section>
+
+  <div class="aviso">
+    Grave apenas com o consentimento do paciente. O áudio é apagado do
+    servidor assim que a transcrição é gerada.
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const mostrar = id => {
+    ['tela-token','tela-pronto','tela-gravando','tela-enviando','tela-fim']
+      .forEach(t => $(t).classList.toggle('oculto', t !== id));
+  };
+
+  const sessaoId = new URLSearchParams(location.search).get('s');
+  if (!sessaoId) {
+    $('erro-token').textContent =
+      'Link inválido. Escaneie novamente o QR code da tela do computador.';
+    $('erro-token').classList.remove('oculto');
+    $('campo-token').disabled = true;
+    $('btn-token').disabled = true;
+  }
+
+  // --- formato de áudio suportado pelo aparelho ------------------------
+  // iOS só grava mp4; Android e desktop preferem webm/opus.
+  function formato() {
+    const tentativas = [
+      ['audio/webm;codecs=opus', 'webm'],
+      ['audio/webm',             'webm'],
+      ['audio/mp4',              'm4a'],
+      ['audio/ogg;codecs=opus',  'ogg'],
+    ];
+    for (const [mime, ext] of tentativas) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) return { mime, ext };
+    }
+    return null;
+  }
+
+  const MOTIVOS = {
+    token_invalido:   'Código incorreto. Confira na tela do computador.',
+    expirado:         'Este código expirou. Gere um novo no computador.',
+    bloqueada:        'Muitas tentativas erradas. Gere um novo código no computador.',
+    ja_utilizada:     'Esta gravação já foi realizada.',
+    sessao_inexistente: 'Sessão não encontrada. Escaneie o QR code novamente.',
+    formato_nao_suportado: 'Este aparelho não é compatível com a gravação.',
+  };
+
+  let urlUpload = null, caminho = null, fmt = null;
+  let gravador = null, pedacos = [], t0 = 0, cronoTimer = null;
+
+  // --- etapa 1: token --------------------------------------------------
+  $('campo-token').addEventListener('input', e => {
+    e.target.value = e.target.value.replace(/\D/g, '');
+  });
+
+  $('btn-token').addEventListener('click', async () => {
+    const token = $('campo-token').value.trim();
+    const box = $('erro-token');
+    box.classList.add('oculto');
+
+    if (token.length < 4) {
+      box.textContent = 'Digite o código completo.';
+      box.classList.remove('oculto');
+      return;
+    }
+
+    fmt = formato();
+    if (!fmt) {
+      box.textContent = MOTIVOS.formato_nao_suportado;
+      box.classList.remove('oculto');
+      return;
+    }
+
+    $('btn-token').disabled = true;
+    $('btn-token').textContent = 'Verificando…';
+
+    try {
+      const r = await fetch('/api/validar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessao_id: sessaoId, token, ext: fmt.ext }),
+      });
+      const j = await r.json();
+
+      if (!j.ok) {
+        box.textContent = MOTIVOS[j.motivo] || 'Não foi possível validar o código.';
+        box.classList.remove('oculto');
+        $('campo-token').value = '';
+        return;
+      }
+
+      urlUpload = j.url_upload;
+      caminho = j.caminho;
+      mostrar('tela-pronto');
+
+    } catch {
+      box.textContent = 'Falha de conexão. Verifique a internet e tente de novo.';
+      box.classList.remove('oculto');
+    } finally {
+      $('btn-token').disabled = false;
+      $('btn-token').textContent = 'Continuar';
+    }
+  });
+
+  // --- etapa 2: gravar -------------------------------------------------
+  $('btn-gravar').addEventListener('click', async () => {
+    const box = $('erro-mic');
+    box.classList.add('oculto');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,          // mono: metade do tamanho, mesma inteligibilidade
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      gravador = new MediaRecorder(stream, {
+        mimeType: fmt.mime,
+        audioBitsPerSecond: 32000,  // fala em opus: 30 min ≈ 7 MB
+      });
+      pedacos = [];
+      gravador.ondataavailable = e => { if (e.data.size) pedacos.push(e.data); };
+      gravador.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        enviar(new Blob(pedacos, { type: fmt.mime }));
+      };
+
+      gravador.start(1000);
+      t0 = Date.now();
+      cronoTimer = setInterval(tick, 500);
+      mostrar('tela-gravando');
+
+    } catch (e) {
+      box.textContent = (e && e.name === 'NotAllowedError')
+        ? 'Permissão de microfone negada. Autorize o acesso nas configurações do navegador e tente de novo.'
+        : 'Não foi possível acessar o microfone deste aparelho.';
+      box.classList.remove('oculto');
+    }
+  });
+
+  function tick() {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    $('cronometro').textContent =
+      String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  $('btn-parar').addEventListener('click', () => {
+    $('btn-parar').disabled = true;
+    clearInterval(cronoTimer);
+    mostrar('tela-enviando');
+    gravador.stop();
+  });
+
+  // --- etapa 3: enviar -------------------------------------------------
+  async function enviar(blob) {
+    try {
+      const up = await fetch(urlUpload, {
+        method: 'PUT',
+        headers: { 'Content-Type': fmt.mime },
+        body: blob,
+      });
+      if (!up.ok) throw new Error('upload ' + up.status);
+
+      const r = await fetch('/api/concluir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessao_id: sessaoId, caminho }),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.motivo || 'falha');
+
+      mostrar('tela-fim');
+
+    } catch {
+      mostrar('tela-pronto');
+      const box = $('erro-mic');
+      box.textContent = 'Falha ao enviar o áudio. Verifique a internet e grave novamente.';
+      box.classList.remove('oculto');
+    }
+  }
+
+  // evita perder a gravação por toque acidental no voltar/fechar
+  window.addEventListener('beforeunload', e => {
+    if (gravador && gravador.state === 'recording') { e.preventDefault(); e.returnValue = ''; }
+  });
+})();
+</script>
+</body>
+</html>
