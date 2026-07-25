@@ -136,6 +136,9 @@
 
   // --- formato de áudio suportado pelo aparelho ------------------------
   // iOS só grava mp4; Android e desktop preferem webm/opus.
+  // O MediaRecorder quer o mime COM codecs ('audio/webm;codecs=opus'),
+  // mas o bucket do Storage só aceita o tipo base ('audio/webm') — por
+  // isso guardamos os dois separadamente.
   function formato() {
     const tentativas = [
       ['audio/webm;codecs=opus', 'webm'],
@@ -144,7 +147,9 @@
       ['audio/ogg;codecs=opus',  'ogg'],
     ];
     for (const [mime, ext] of tentativas) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) return { mime, ext };
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) {
+        return { mime, ext, base: mime.split(';')[0] };
+      }
     }
     return null;
   }
@@ -270,12 +275,16 @@
   // --- etapa 3: enviar -------------------------------------------------
   async function enviar(blob) {
     try {
+      // Content-Type sem o ';codecs=...': é o que o bucket aceita.
       const up = await fetch(urlUpload, {
         method: 'PUT',
-        headers: { 'Content-Type': fmt.mime },
+        headers: { 'Content-Type': fmt.base },
         body: blob,
       });
-      if (!up.ok) throw new Error('upload ' + up.status);
+      if (!up.ok) {
+        const detalhe = await up.text().catch(() => '');
+        throw new Error(`Upload recusado (${up.status}). ${detalhe.slice(0, 200)}`);
+      }
 
       const r = await fetch('/api/concluir', {
         method: 'POST',
@@ -283,14 +292,15 @@
         body: JSON.stringify({ sessao_id: sessaoId, caminho }),
       });
       const j = await r.json();
-      if (!j.ok) throw new Error(j.motivo || 'falha');
+      if (!j.ok) throw new Error(`Falha ao concluir: ${j.motivo || 'motivo desconhecido'}`);
 
       mostrar('tela-fim');
 
-    } catch {
+    } catch (e) {
       mostrar('tela-pronto');
       const box = $('erro-mic');
-      box.textContent = 'Falha ao enviar o áudio. Verifique a internet e grave novamente.';
+      // mostra o motivo real: culpar a internet esconde erros de servidor
+      box.textContent = (e && e.message) ? e.message : 'Falha ao enviar o áudio.';
       box.classList.remove('oculto');
     }
   }
