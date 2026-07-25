@@ -7,6 +7,7 @@
 // =====================================================================
 
 import express from 'express';
+import QRCode from 'qrcode';
 import { createClient } from '@supabase/supabase-js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -111,6 +112,37 @@ app.post('/api/concluir', async (req, res) => {
   } catch (e) {
     log(`ERRO /api/concluir: ${e.message}`);
     res.status(500).json({ erro: 'falha_interna' });
+  }
+});
+
+
+// ---------------------------------------------------------------------
+// GET /qr?s=<sessao_id>
+// Devolve o QR code como SVG, para o WeWeb exibir num elemento de imagem.
+// Não expõe nada: o QR carrega apenas o link com o id da sessão, e sem o
+// token de 6 dígitos esse link não abre gravação nenhuma.
+// ---------------------------------------------------------------------
+app.get('/qr', async (req, res) => {
+  try {
+    const s = req.query.s;
+    if (!ehUuid(s)) return res.status(400).send('sessao invalida');
+
+    const base = `https://${req.headers['x-forwarded-host'] || req.headers.host}`;
+    const svg = await QRCode.toString(`${base}/?s=${s}`, {
+      type: 'svg',
+      margin: 1,
+      width: 320,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#0f1720', light: '#ffffff' },
+    });
+
+    res.set('Content-Type', 'image/svg+xml');
+    res.set('Cache-Control', 'no-store');   // cada sessão tem o seu
+    res.send(svg);
+
+  } catch (e) {
+    log(`ERRO /qr: ${e.message}`);
+    res.status(500).send('falha');
   }
 });
 
