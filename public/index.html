@@ -1,315 +1,297 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Gravar consulta</title>
-<style>
-  :root {
-    --fundo: #0f1720;
-    --cartao: #18232f;
-    --borda: #2a3a4a;
-    --texto: #e8eef4;
-    --suave: #93a5b5;
-    --acento: #2f9e6e;
-    --alerta: #d9534f;
-  }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body {
-    margin: 0; min-height: 100vh;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--fundo); color: var(--texto);
-    display: flex; align-items: center; justify-content: center; padding: 20px;
-  }
-  .cartao {
-    width: 100%; max-width: 420px; background: var(--cartao);
-    border: 1px solid var(--borda); border-radius: 16px; padding: 28px 22px;
-  }
-  h1 { font-size: 19px; margin: 0 0 6px; font-weight: 600; }
-  p.sub { margin: 0 0 22px; color: var(--suave); font-size: 14px; line-height: 1.5; }
-  input[type=tel] {
-    width: 100%; padding: 16px; font-size: 30px; text-align: center;
-    letter-spacing: 10px; border-radius: 12px; border: 1px solid var(--borda);
-    background: #0d151d; color: var(--texto); margin-bottom: 14px;
-  }
-  input[type=tel]:focus { outline: none; border-color: var(--acento); }
-  button {
-    width: 100%; padding: 17px; font-size: 16px; font-weight: 600;
-    border: none; border-radius: 12px; background: var(--acento); color: #fff;
-    cursor: pointer;
-  }
-  button:disabled { opacity: .5; }
-  button.parar { background: var(--alerta); }
-  .oculto { display: none; }
-  .erro {
-    background: rgba(217,83,79,.12); border: 1px solid rgba(217,83,79,.4);
-    color: #ffb3b0; padding: 12px 14px; border-radius: 10px;
-    font-size: 14px; margin-bottom: 14px; line-height: 1.45;
-  }
-  .cronometro {
-    font-size: 46px; font-variant-numeric: tabular-nums; text-align: center;
-    margin: 26px 0 6px; font-weight: 300;
-  }
-  .estado { text-align: center; color: var(--suave); font-size: 14px; margin-bottom: 26px; }
-  .ponto {
-    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-    background: var(--alerta); margin-right: 7px; animation: pisca 1.2s infinite;
-  }
-  @keyframes pisca { 50% { opacity: .25; } }
-  .fim { text-align: center; padding: 14px 0; }
-  .fim .marca { font-size: 46px; margin-bottom: 12px; }
-  .aviso {
-    margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--borda);
-    color: var(--suave); font-size: 12px; line-height: 1.5;
-  }
-</style>
-</head>
-<body>
-<div class="cartao">
+// =====================================================================
+// Worker de transcrição e resumo de consultas
+// Roda no VPS (Coolify), ao lado do Whisper e do Ollama.
+//
+// Ciclo: reivindica sessão -> baixa áudio -> transcreve -> resume ->
+//        grava resultado -> APAGA o áudio (LGPD)
+//
+// Nenhum dado de paciente sai do servidor: Whisper e Ollama são locais.
+// =====================================================================
 
-  <!-- 1. token -->
-  <section id="tela-token">
-    <h1>Gravar consulta</h1>
-    <p class="sub">Digite o código de 6 dígitos que aparece na tela do computador.</p>
-    <div id="erro-token" class="erro oculto"></div>
-    <input id="campo-token" type="tel" inputmode="numeric" maxlength="6"
-           autocomplete="off" placeholder="000000">
-    <button id="btn-token">Continuar</button>
-  </section>
+import { createClient } from '@supabase/supabase-js';
 
-  <!-- 2. pronto para gravar -->
-  <section id="tela-pronto" class="oculto">
-    <h1>Tudo certo</h1>
-    <p class="sub">Aproxime o aparelho e toque em gravar quando iniciar o atendimento.</p>
-    <div id="erro-mic" class="erro oculto"></div>
-    <button id="btn-gravar">Iniciar gravação</button>
-  </section>
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  WHISPER_URL,
+  WHISPER_API_KEY,
+  WHISPER_MODEL = 'deepdml/faster-whisper-large-v3-turbo-ct2',
+  OLLAMA_URL = 'http://ollama:11434',
+  OLLAMA_MODEL = 'qwen2.5:7b-instruct-q4_K_M',
+  BUCKET = 'gravacoes',
+  INTERVALO_MS = '10000',
+} = process.env;
 
-  <!-- 3. gravando -->
-  <section id="tela-gravando" class="oculto">
-    <div class="cronometro" id="cronometro">00:00</div>
-    <div class="estado"><span class="ponto"></span>Gravando</div>
-    <button id="btn-parar" class="parar">Encerrar e enviar</button>
-  </section>
+for (const [k, v] of Object.entries({
+  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WHISPER_URL, WHISPER_API_KEY,
+})) {
+  if (!v) { console.error(`Variável obrigatória ausente: ${k}`); process.exit(1); }
+}
 
-  <!-- 4. enviando -->
-  <section id="tela-enviando" class="oculto">
-    <div class="fim">
-      <div class="marca">⏳</div>
-      <h1>Enviando…</h1>
-      <p class="sub">Não feche esta tela até terminar.</p>
-    </div>
-  </section>
+const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
+});
 
-  <!-- 5. pronto -->
-  <section id="tela-fim" class="oculto">
-    <div class="fim">
-      <div class="marca">✓</div>
-      <h1>Gravação enviada</h1>
-      <p class="sub">O resumo aparecerá no atendimento em alguns minutos.
-        Pode fechar esta janela.</p>
-    </div>
-  </section>
+const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-  <div class="aviso">
-    Grave apenas com o consentimento do paciente. O áudio é apagado do
-    servidor assim que a transcrição é gerada.
-  </div>
-</div>
 
-<script>
-(function () {
-  const $ = id => document.getElementById(id);
-  const mostrar = id => {
-    ['tela-token','tela-pronto','tela-gravando','tela-enviando','tela-fim']
-      .forEach(t => $(t).classList.toggle('oculto', t !== id));
-  };
+// ---------------------------------------------------------------------
+// Transcrição (Whisper self-hosted)
+// ---------------------------------------------------------------------
+async function transcrever(blob, nomeArquivo) {
+  const form = new FormData();
+  form.append('file', blob, nomeArquivo);
+  form.append('model', WHISPER_MODEL);
+  form.append('language', 'pt');
+  form.append('response_format', 'verbose_json');
+  // O parâmetro prompt do Whisper tem janela curta (~224 tokens): lista de
+  // medicamentos aqui NÃO funciona e já foi tentada. Quem confere nome de
+  // remédio agora é o catálogo (conferir_medicamentos), depois da extração.
+  // Aqui fica só a pista de contexto clínico geral.
+  form.append('prompt',
+    'Consulta médica em português do Brasil. Termos clínicos, sintomas, ' +
+    'diagnósticos, medicamentos, dosagens em miligramas, pressão arterial, CID.');
 
-  const sessaoId = new URLSearchParams(location.search).get('s');
-  if (!sessaoId) {
-    $('erro-token').textContent =
-      'Link inválido. Escaneie novamente o QR code da tela do computador.';
-    $('erro-token').classList.remove('oculto');
-    $('campo-token').disabled = true;
-    $('btn-token').disabled = true;
-  }
-
-  // --- formato de áudio suportado pelo aparelho ------------------------
-  // iOS só grava mp4; Android e desktop preferem webm/opus.
-  // O MediaRecorder quer o mime COM codecs ('audio/webm;codecs=opus'),
-  // mas o bucket do Storage só aceita o tipo base ('audio/webm') — por
-  // isso guardamos os dois separadamente.
-  function formato() {
-    const tentativas = [
-      ['audio/webm;codecs=opus', 'webm'],
-      ['audio/webm',             'webm'],
-      ['audio/mp4',              'm4a'],
-      ['audio/ogg;codecs=opus',  'ogg'],
-    ];
-    for (const [mime, ext] of tentativas) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(mime)) {
-        return { mime, ext, base: mime.split(';')[0] };
-      }
-    }
-    return null;
-  }
-
-  const MOTIVOS = {
-    token_invalido:   'Código incorreto. Confira na tela do computador.',
-    expirado:         'Este código expirou. Gere um novo no computador.',
-    bloqueada:        'Muitas tentativas erradas. Gere um novo código no computador.',
-    ja_utilizada:     'Esta gravação já foi realizada.',
-    sessao_inexistente: 'Sessão não encontrada. Escaneie o QR code novamente.',
-    formato_nao_suportado: 'Este aparelho não é compatível com a gravação.',
-  };
-
-  let urlUpload = null, caminho = null, fmt = null;
-  let gravador = null, pedacos = [], t0 = 0, cronoTimer = null;
-
-  // --- etapa 1: token --------------------------------------------------
-  $('campo-token').addEventListener('input', e => {
-    e.target.value = e.target.value.replace(/\D/g, '');
+  const r = await fetch(`${WHISPER_URL}/v1/audio/transcriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${WHISPER_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(45 * 60 * 1000),
   });
 
-  $('btn-token').addEventListener('click', async () => {
-    const token = $('campo-token').value.trim();
-    const box = $('erro-token');
-    box.classList.add('oculto');
+  if (!r.ok) throw new Error(`Whisper ${r.status}: ${await r.text()}`);
+  const j = await r.json();
+  return { texto: (j.text || '').trim(), duracao: j.duration ?? null };
+}
 
-    if (token.length < 4) {
-      box.textContent = 'Digite o código completo.';
-      box.classList.remove('oculto');
-      return;
-    }
 
-    fmt = formato();
-    if (!fmt) {
-      box.textContent = MOTIVOS.formato_nao_suportado;
-      box.classList.remove('oculto');
-      return;
-    }
+// ---------------------------------------------------------------------
+// Resumo estruturado (Ollama local)
+// ---------------------------------------------------------------------
+const INSTRUCOES = `Você é um escriba clínico. Recebe a transcrição bruta do áudio de uma consulta em português do Brasil e organiza o conteúdo nos campos do prontuário.
 
-    $('btn-token').disabled = true;
-    $('btn-token').textContent = 'Verificando…';
+Este é um RASCUNHO: o profissional de saúde vai conferir, corrigir e assinar. Ele não vai direto ao prontuário.
 
-    try {
-      const r = await fetch('/api/validar', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessao_id: sessaoId, token, ext: fmt.ext }),
-      });
-      const j = await r.json();
+SUA TAREFA PRINCIPAL É PREENCHER OS CAMPOS.
+Percorra a transcrição inteira e distribua TODO o conteúdo clínico entre os campos abaixo. Um campo só fica vazio quando a transcrição realmente não disser nada sobre aquele assunto. Deixar um campo vazio havendo informação correspondente é o pior erro possível — o rascunho fica inútil e o profissional precisa reescrever tudo do zero.
 
-      if (!j.ok) {
-        box.textContent = MOTIVOS[j.motivo] || 'Não foi possível validar o código.';
-        box.classList.remove('oculto');
-        $('campo-token').value = '';
-        return;
-      }
+Você DEVE reorganizar e resumir com suas palavras. Não é para copiar frases soltas nem esperar que o médico use os termos técnicos do campo. Se o paciente disse "minha pressão fica 14 por 9", isso é história da doença atual. Se disse "às vezes esqueço de tomar", isso é adesão ao tratamento e entra na história. Se o médico falou "não vou mexer na medicação, vou renovar a receita", isso é conduta.
 
-      urlUpload = j.url_upload;
-      caminho = j.caminho;
-      mostrar('tela-pronto');
+O que vai em cada campo:
+- queixa_principal: o motivo da consulta, em uma frase. Em retorno de doença crônica, é o acompanhamento dela.
+- historia_doenca_atual: evolução, sintomas, valores medidos, adesão ao tratamento, hábitos relevantes (alimentação, atividade, hidratação).
+- antecedentes: doenças prévias, cirurgias, internações, episódios anteriores, idade, alergias.
+- exame_fisico: apenas medidas e achados examinados na consulta. Se o profissional não examinou, deixe vazio.
+- hipoteses_diagnosticas: as hipóteses que o PROFISSIONAL verbalizou. Não crie diagnóstico próprio.
+- conduta: medicações mantidas ou alteradas, receitas, orientações dadas, exames pedidos, retorno agendado.
+- medicamentos_mencionados: nomes e dosagens citados. ATENÇÃO: a transcrição é automática e erra a grafia de nomes comerciais. Se o mesmo medicamento aparecer escrito de formas diferentes (ex.: "A-Block" e "Diabloque" são a mesma coisa mal transcrita), liste UMA vez só, com a grafia mais provável, e registre a dúvida em trechos_incertos. Nunca liste o mesmo remédio duas vezes.
+- observacoes: contexto relevante que não coube nos outros campos. Se a transcrição não for de uma consulta clínica, escreva isso aqui e deixe os demais campos vazios.
+- trechos_incertos: SOMENTE nomes de medicamento, dosagens ou números que soaram ambíguos na transcrição. Não use este campo para conteúdo que você simplesmente resolveu não classificar.
 
-    } catch {
-      box.textContent = 'Falha de conexão. Verifique a internet e tente de novo.';
-      box.classList.remove('oculto');
-    } finally {
-      $('btn-token').disabled = false;
-      $('btn-token').textContent = 'Continuar';
-    }
+O que NÃO fazer:
+- Não invente sintoma, medida, exame ou diagnóstico que não esteja na transcrição.
+- Não registre como exame físico algo que o paciente relatou em casa; isso é história.
+
+EXEMPLO (formato e nível de detalhe esperados):
+
+Transcrição: "Doutora, essa tosse não passa, já faz umas duas semanas. Seca, piora à noite. Febre não tive. Já tive bronquite quando era criança. Deixa eu escutar seu pulmão... murmúrio normal, sem chiado. Olha, parece alergia. Vou passar loratadina 10 miligramas, um por dia à noite. Se em uma semana não melhorar, o senhor volta."
+
+Resposta:
+{"queixa_principal":"Tosse seca há duas semanas.","historia_doenca_atual":"Tosse seca há cerca de duas semanas, com piora noturna. Nega febre.","antecedentes":"Bronquite na infância.","exame_fisico":"Ausculta pulmonar com murmúrio vesicular normal, sem sibilos.","hipoteses_diagnosticas":"Quadro sugestivo de origem alérgica, conforme avaliação do profissional.","conduta":"Prescrita loratadina 10 mg, um comprimido à noite. Retorno em uma semana caso não haja melhora.","medicamentos_mencionados":["Loratadina 10 mg"],"observacoes":"","trechos_incertos":[]}
+
+Responda SOMENTE com um objeto JSON válido nesse mesmo formato, sem nenhum texto fora dele.`;
+
+async function resumir(transcricao) {
+  const r = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      stream: false,
+      format: 'json',            // força saída JSON válida
+      options: {
+        temperature: 0.1,        // extração, não criatividade
+        num_ctx: 16384,          // consulta longa gera transcrito grande
+      },
+      messages: [
+        { role: 'system', content: INSTRUCOES },
+        { role: 'user', content: `Transcrição da consulta:\n\n${transcricao}` },
+      ],
+    }),
+    signal: AbortSignal.timeout(60 * 60 * 1000), // CPU é lenta; sem pressa
   });
 
-  // --- etapa 2: gravar -------------------------------------------------
-  $('btn-gravar').addEventListener('click', async () => {
-    const box = $('erro-mic');
-    box.classList.add('oculto');
+  if (!r.ok) throw new Error(`Ollama ${r.status}: ${await r.text()}`);
+  const j = await r.json();
+  const texto = (j.message?.content || '').trim();
 
+  try {
+    return JSON.parse(texto);
+  } catch {
+    return { erro_parse: true, texto_bruto: texto };
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Conferência dos medicamentos contra o catálogo
+//
+// POR QUE ISTO EXISTE
+// O Whisper erra a grafia de nome comercial. Num teste real ele escreveu
+// "A-Block" numa passagem e "Diabloque" na outra, para o mesmo remédio
+// (Ablok), e o modelo do resumo listou os dois como se fossem diferentes.
+// Colocar uma lista de medicamentos no prompt do Whisper foi tentado e
+// não funcionou: a janela do parâmetro é curta e existem dezenas de
+// milhares de medicamentos.
+//
+// A conferência NUNCA corrige em silêncio. Nome com boa correspondência
+// é anotado com o princípio ativo; dúvida e nome desconhecido vão para
+// "trechos_incertos", que a tela mostra marcado como CONFERIR. Trocar um
+// nome de remédio por conta própria seria a máquina adivinhando
+// prescrição — exatamente o que se quer evitar.
+// ---------------------------------------------------------------------
+async function conferirMedicamentos(resumo) {
+  const originais = Array.isArray(resumo?.medicamentos_mencionados)
+    ? resumo.medicamentos_mencionados.filter(m => typeof m === 'string' && m.trim())
+    : [];
+
+  if (!originais.length) return resumo;
+
+  const { data, error } = await db.rpc('conferir_medicamentos', { p_termos: originais });
+  if (error) {
+    // catálogo indisponível não pode derrubar a sessão inteira:
+    // o resumo segue com os nomes crus, que é o que já acontecia antes.
+    log(`AVISO — conferência de medicamentos falhou: ${error.message}`);
+    return resumo;
+  }
+
+  const conferidos = Array.isArray(data) ? data : [];
+  const lista = [];
+  const duvidas = Array.isArray(resumo.trechos_incertos)
+    ? resumo.trechos_incertos.filter(Boolean).map(String)
+    : [];
+
+  for (const c of conferidos) {
+    const termo = c?.termo || '';
+
+    if (c?.situacao === 'confirmado') {
+      // mantém o termo original: é ele que carrega a dose e a posologia
+      lista.push(c.principio ? `${termo} (${c.principio})` : termo);
+
+      // nomes parecidos entre si merecem conferência mesmo quando o
+      // primeiro bate bem: Losartana/Valsartana, Omeprazol/Esomeprazol
+      if (Array.isArray(c.alternativas) && c.alternativas.length) {
+        duvidas.push(
+          `"${termo}": confira se não é ${c.alternativas.join(' ou ')} — nomes parecidos.`
+        );
+      }
+
+    } else if (c?.situacao === 'incerto') {
+      lista.push(termo);
+      duvidas.push(
+        `"${termo}": possivelmente ${c.nome}` +
+        (c.principio ? ` (${c.principio})` : '') +
+        `. A transcrição pode ter errado o nome — confirmar.`
+      );
+
+    } else {
+      lista.push(termo);
+      duvidas.push(`"${termo}": não encontrado no catálogo de medicamentos — confirmar.`);
+    }
+  }
+
+  return { ...resumo, medicamentos_mencionados: lista, trechos_incertos: duvidas };
+}
+
+
+// ---------------------------------------------------------------------
+// Processamento de uma sessão
+// ---------------------------------------------------------------------
+async function processar(s) {
+  log(`sessão ${s.id}: iniciando`);
+
+  if (!s.audio_path) throw new Error('sessão sem audio_path');
+
+  const { data: arquivo, error: errDl } = await db.storage.from(BUCKET).download(s.audio_path);
+  if (errDl) throw new Error(`download do áudio: ${errDl.message}`);
+
+  const nome = s.audio_path.split('/').pop() || 'consulta.webm';
+  log(`sessão ${s.id}: transcrevendo (${(arquivo.size / 1048576).toFixed(1)} MB)`);
+
+  const t0 = Date.now();
+  const { texto, duracao } = await transcrever(arquivo, nome);
+  log(`sessão ${s.id}: transcrito em ${((Date.now() - t0) / 1000).toFixed(0)}s ` +
+      `(${texto.length} caracteres, áudio de ${duracao ? duracao.toFixed(0) : '?'}s)`);
+
+  if (!texto) throw new Error('transcrição vazia');
+
+  const t1 = Date.now();
+  let resumo = await resumir(texto);
+  log(`sessão ${s.id}: resumido em ${((Date.now() - t1) / 1000).toFixed(0)}s`);
+
+  // confere os nomes de medicamento contra o catálogo antes de gravar
+  resumo = await conferirMedicamentos(resumo);
+
+  const { error: errUp } = await db.from('sessoes_gravacao').update({
+    status: 'concluida',
+    transcricao: texto,
+    resumo,
+    audio_duracao_seg: duracao,
+    modelo_transcricao: WHISPER_MODEL,
+    processado_em: new Date().toISOString(),
+  }).eq('id', s.id);
+  if (errUp) throw new Error(`gravar resultado: ${errUp.message}`);
+
+  // LGPD: o áudio some assim que vira texto
+  const { error: errRm } = await db.storage.from(BUCKET).remove([s.audio_path]);
+  if (errRm) {
+    log(`sessão ${s.id}: AVISO — falha ao apagar o áudio: ${errRm.message}`);
+  } else {
+    await db.from('sessoes_gravacao')
+      .update({ audio_excluido_em: new Date().toISOString() })
+      .eq('id', s.id);
+  }
+
+  log(`sessão ${s.id}: concluída`);
+}
+
+
+// ---------------------------------------------------------------------
+// Laço principal
+// ---------------------------------------------------------------------
+let rodando = true;
+process.on('SIGTERM', () => { log('SIGTERM, encerrando após a sessão atual'); rodando = false; });
+process.on('SIGINT',  () => { log('SIGINT, encerrando após a sessão atual');  rodando = false; });
+
+const dormir = ms => new Promise(r => setTimeout(r, ms));
+
+async function loop() {
+  log(`worker no ar · whisper=${WHISPER_URL} (${WHISPER_MODEL}) · ollama=${OLLAMA_URL} (${OLLAMA_MODEL})`);
+
+  while (rodando) {
+    let sessao = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,          // mono: metade do tamanho, mesma inteligibilidade
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      const { data, error } = await db.rpc('reivindicar_sessao_gravacao');
+      if (error) throw new Error(`reivindicar: ${error.message}`);
+      sessao = Array.isArray(data) ? data[0] : data;
 
-      gravador = new MediaRecorder(stream, {
-        mimeType: fmt.mime,
-        audioBitsPerSecond: 32000,  // fala em opus: 30 min ≈ 7 MB
-      });
-      pedacos = [];
-      gravador.ondataavailable = e => { if (e.data.size) pedacos.push(e.data); };
-      gravador.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
-        enviar(new Blob(pedacos, { type: fmt.mime }));
-      };
+      if (!sessao?.id) { await dormir(Number(INTERVALO_MS)); continue; }
 
-      gravador.start(1000);
-      t0 = Date.now();
-      cronoTimer = setInterval(tick, 500);
-      mostrar('tela-gravando');
-
+      await processar(sessao);
     } catch (e) {
-      box.textContent = (e && e.name === 'NotAllowedError')
-        ? 'Permissão de microfone negada. Autorize o acesso nas configurações do navegador e tente de novo.'
-        : 'Não foi possível acessar o microfone deste aparelho.';
-      box.classList.remove('oculto');
-    }
-  });
-
-  function tick() {
-    const s = Math.floor((Date.now() - t0) / 1000);
-    $('cronometro').textContent =
-      String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
-  }
-
-  $('btn-parar').addEventListener('click', () => {
-    $('btn-parar').disabled = true;
-    clearInterval(cronoTimer);
-    mostrar('tela-enviando');
-    gravador.stop();
-  });
-
-  // --- etapa 3: enviar -------------------------------------------------
-  async function enviar(blob) {
-    try {
-      // Content-Type sem o ';codecs=...': é o que o bucket aceita.
-      const up = await fetch(urlUpload, {
-        method: 'PUT',
-        headers: { 'Content-Type': fmt.base },
-        body: blob,
-      });
-      if (!up.ok) {
-        const detalhe = await up.text().catch(() => '');
-        throw new Error(`Upload recusado (${up.status}). ${detalhe.slice(0, 200)}`);
+      log(`ERRO: ${e.message}`);
+      if (sessao?.id) {
+        await db.from('sessoes_gravacao').update({
+          status: 'erro',
+          erro_mensagem: String(e.message).slice(0, 1000),
+        }).eq('id', sessao.id);
       }
-
-      const r = await fetch('/api/concluir', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessao_id: sessaoId, caminho }),
-      });
-      const j = await r.json();
-      if (!j.ok) throw new Error(`Falha ao concluir: ${j.motivo || 'motivo desconhecido'}`);
-
-      mostrar('tela-fim');
-
-    } catch (e) {
-      mostrar('tela-pronto');
-      const box = $('erro-mic');
-      // mostra o motivo real: culpar a internet esconde erros de servidor
-      box.textContent = (e && e.message) ? e.message : 'Falha ao enviar o áudio.';
-      box.classList.remove('oculto');
+      await dormir(5000);
     }
   }
 
-  // evita perder a gravação por toque acidental no voltar/fechar
-  window.addEventListener('beforeunload', e => {
-    if (gravador && gravador.state === 'recording') { e.preventDefault(); e.returnValue = ''; }
-  });
-})();
-</script>
-</body>
-</html>
+  log('worker encerrado');
+  process.exit(0);
+}
+
+loop();
